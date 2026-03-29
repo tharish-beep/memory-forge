@@ -9,7 +9,7 @@ import {
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
 const STORAGE_KEY = "sr_flashcards_state_v1";
-const NAV_ITEMS = ["Decks", "Add", "Browse", "Stats", "Personalization", "Sign In"];
+const NAV_ITEMS = ["Decks", "Add", "Browse", "Stats", "Personalization"];
 const DEFAULT_DAILY_GOAL = 20;
 const DEFAULT_REVIEW_SETTINGS = { dailyReviewLimit: 200, newCardsPerDay: 20 };
 
@@ -1061,7 +1061,7 @@ export default function App() {
     <div className="app" style={themeStyle}>
       <nav className="navbar">
         <div className="nav-left">
-          {NAV_ITEMS.map((item) => (
+          {(user ? NAV_ITEMS : [...NAV_ITEMS, "Sign In"]).map((item) => (
             <button
               key={item}
               className={`nav-item ${view === item ? "active" : ""}`}
@@ -1070,8 +1070,6 @@ export default function App() {
               {item}
             </button>
           ))}
-        </div>
-        <div className="nav-right">
           {user ? (
             <>
               <button className="nav-item" onClick={() => syncToFirestore(true)} disabled={syncBusy}>
