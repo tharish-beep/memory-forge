@@ -926,7 +926,6 @@ export default function App() {
   }
 
   const activeDeckName = decks.find((deck) => deck.id === activeDeckId)?.name || "Deck";
-  const lastSyncedLabel = lastSyncedAt ? formatDateTime(lastSyncedAt) : "Never";
   function exitReviewSession() {
     setInReview(false);
     setShowAnswer(false);
@@ -1075,8 +1074,6 @@ export default function App() {
         <div className="nav-right">
           {user ? (
             <>
-              <span className="sync-meta">{user.email}</span>
-              <span className="sync-meta">Last synced: {lastSyncedLabel}</span>
               <button className="nav-item" onClick={() => syncToFirestore(true)} disabled={syncBusy}>
                 {syncBusy ? "Syncing..." : "Sync"}
               </button>
@@ -1084,9 +1081,7 @@ export default function App() {
                 Sign Out
               </button>
             </>
-          ) : (
-            <span className="sync-meta">Not signed in</span>
-          )}
+          ) : null}
         </div>
       </nav>
 
@@ -1153,26 +1148,29 @@ export default function App() {
                       />
                     </button>
                   </div>
-
-                  <div className="icon-wrap">
-                    {deck.icon ? <img src={deck.icon} alt={`${deck.name} icon`} /> : <span>{deck.name[0]}</span>}
-                  </div>
-                  <div className="deck-name">{deck.name}</div>
-                  <div className="counts">
-                    <span>New {stats.newCount}</span>
-                    <span>Learn {stats.learnCount}</span>
-                    <span>Due {stats.dueCount}</span>
-                  </div>
-                  <div className="deck-controls" onClick={(event) => event.stopPropagation()}>
-                    <button className="mini-btn" onClick={() => startReviewSession(deck.id)}>
-                      Study
-                    </button>
-                    <button className="mini-btn" onClick={() => renameDeck(deck.id)}>
-                      Rename
-                    </button>
-                    <button className="mini-btn danger" onClick={() => deleteDeck(deck.id)}>
-                      Delete
-                    </button>
+                  <div className="deck-body">
+                    <div className="icon-wrap">
+                      {deck.icon ? <img src={deck.icon} alt={`${deck.name} icon`} /> : <span>{deck.name[0]}</span>}
+                    </div>
+                    <div className="deck-info">
+                      <div className="deck-name">{deck.name}</div>
+                      <div className="counts">
+                        <span>New {stats.newCount}</span>
+                        <span>Learn {stats.learnCount}</span>
+                        <span>Due {stats.dueCount}</span>
+                      </div>
+                      <div className="deck-controls" onClick={(event) => event.stopPropagation()}>
+                        <button className="mini-btn" onClick={() => startReviewSession(deck.id)}>
+                          Study
+                        </button>
+                        <button className="mini-btn" onClick={() => renameDeck(deck.id)}>
+                          Rename
+                        </button>
+                        <button className="mini-btn danger" onClick={() => deleteDeck(deck.id)}>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </article>
               );
