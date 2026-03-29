@@ -1,0 +1,541 @@
+import { useEffect, useMemo, useState } from "react";
+import { auth, db } from "./firebase";
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut
+} from "firebase/auth";
+import {
+  doc,
+  setDoc,
+  onSnapshot
+} from "firebase/firestore";
+
+const STORAGE_KEY = "sm2_flashcards_v1";
+const HISTORY_KEY = "sm2_review_history_v1";
+const SETTINGS_KEY = "sm2_settings_v1";
+
+const DEFAULT_SETTINGS = {
+  dailyReviewLimit: 100,
+  newCardsPerDay: 20
+};
+
+function loadLocalCards() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalCards(cards) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+}
+
+function loadLocalHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalHistory(history) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+}
+
+function loadLocalSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function saveLocalSettings(settings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function getDateKey(date = new Date()) {
+  return date.toISOString().split("T")[0];
+}
+
+function recordReview(history) {
+  const today = getDateKey();
+  return { ...history, [today]: (history[today] || 0) + 1 };
+}
+
+function createCard(front, back) {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    front,
+    back,
+    createdAt: now,
+    dueDate: now,
+    interval: 0,
+    repetitions: 0,
+    easeFactor: 2.5,
+    lastReviewedAt: null,
+    isNew: true
+  };
+}
+
+function applySm2(card, quality) {
+  const q = Math.max(0, Math.min(5, quality));
+  const updated = { ...card, isNew: false };
+
+  let ef = updated.easeFactor;
+  ef += 0.1 - (5 - q) * (0.08 + (5 - q) * 0.02);
+  ef = Math.max(1.3, ef);
+
+  if (q >= 3) {
+    if (updated.repetitions === 0) updated.interval = 1;
+    else if (updated.repetitions === 1) updated.interval = 6;
+    else updated.interval = Math.max(1, Math.round(updated.interval * ef));
+    updated.repetitions += 1;
+  } else {
+    updated.repetitions = 0;
+    updated.interval = 1;
+  }
+
+  const next = new Date();
+  next.setDate(next.getDate() + updated.interval);
+
+  updated.easeFactor = Number(ef.toFixed(2));
+  updated.lastReviewedAt = new Date().toISOString();
+  updated.dueDate = next.toISOString();
+
+  return updated;
+}
+
+function formatDate(iso) {
+  return new Date(iso).toLocaleDateString();
+}
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [cards, setCards] = useState([]);
+  const [reviewHistory, setReviewHistory] = useState({});
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [currentView, setCurrentView] = useState("decks");
+  const [studying, setStudying] = useState(false);
+  const [showAnswer, setShowAnswer] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [front, setFront] = useState("");
+  const [back, setBack] = useState("");
+  const [bulkText, setBulkText] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+      if (!u) {
+        setCards(loadLocalCards());
+        setReviewHistory(loadLocalHistory());
+        setSettings(loadLocalSettings());
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const ref = doc(db, "users", user.uid);
+    const unsub = onSnapshot(ref, (snap) => {
+      if (snap.exists()) {
+        const d = snap.data();
+        setCards(d.cards || []);
+        setReviewHistory(d.reviewHistory || {});
+        setSettings({ ...DEFAULT_SETTINGS, ...d.settings });
+      } else {
+        const lc = loadLocalCards(), lh = loadLocalHistory(), ls = loadLocalSettings();
+        setCards(lc); setReviewHistory(lh); setSettings(ls);
+        setDoc(ref, { cards: lc, reviewHistory: lh, settings: ls });
+      }
+    });
+    return unsub;
+  }, [user]);
+
+  async function saveToCloud(c, h, s) {
+    if (!user) {
+      saveLocalCards(c); saveLocalHistory(h); saveLocalSettings(s);
+      return;
+    }
+    setSyncing(true);
+    try {
+      await setDoc(doc(db, "users", user.uid), { cards: c, reviewHistory: h, settings: s });
+    } catch (e) { console.error(e); }
+    setSyncing(false);
+  }
+
+  const { newCards, learnCards, dueCards } = useMemo(() => {
+    const now = new Date();
+    const newC = [], learnC = [], dueC = [];
+    cards.forEach(card => {
+      if (card.isNew) newC.push(card);
+      else if (new Date(card.dueDate) <= now) {
+        if (card.interval < 1) learnC.push(card);
+        else dueC.push(card);
+      }
+    });
+    return { newCards: newC, learnCards: learnC, dueCards: dueC };
+  }, [cards]);
+
+  const reviewQueue = useMemo(() => {
+    return [...newCards.slice(0, settings.newCardsPerDay), ...learnCards, ...dueCards]
+      .slice(0, settings.dailyReviewLimit);
+  }, [newCards, learnCards, dueCards, settings]);
+
+  const currentCard = reviewQueue[0] || null;
+
+  function updateCards(next) {
+    setCards(next);
+    saveToCloud(next, reviewHistory, settings);
+  }
+
+  function handleAddCard(e) {
+    e.preventDefault();
+    const f = front.trim(), b = back.trim();
+    if (!f || !b) return;
+    updateCards([createCard(f, b), ...cards]);
+    setFront(""); setBack("");
+  }
+
+  function handleBulkImport(e) {
+    e.preventDefault();
+    const lines = bulkText.trim().split("\n").filter(l => l.includes("\t"));
+    const newC = lines.map(l => {
+      const [f, b] = l.split("\t");
+      return f?.trim() && b?.trim() ? createCard(f.trim(), b.trim()) : null;
+    }).filter(Boolean);
+    if (newC.length) {
+      updateCards([...newC, ...cards]);
+      setBulkText("");
+    }
+  }
+
+  function handleReview(quality) {
+    if (!currentCard) return;
+    const next = cards.map(c => c.id === currentCard.id ? applySm2(c, quality) : c);
+    const nextH = recordReview(reviewHistory);
+    setCards(next); setReviewHistory(nextH);
+    saveToCloud(next, nextH, settings);
+    setShowAnswer(false);
+    if (reviewQueue.length <= 1) setStudying(false);
+  }
+
+  function handleDelete(id) {
+    updateCards(cards.filter(c => c.id !== id));
+  }
+
+  function handleSync() {
+    if (user) saveToCloud(cards, reviewHistory, settings);
+  }
+
+  if (authLoading) {
+    return <div className="loading-container"><div className="spinner" />Loading...</div>;
+  }
+
+  if (studying && currentCard) {
+    return (
+      <div className="study-screen">
+        <div className="study-header">
+          <button className="btn-secondary" onClick={() => { setStudying(false); setShowAnswer(false); }}>
+            ← Back
+          </button>
+          <span className="study-title">Default Deck</span>
+          <span className="study-progress">{reviewQueue.length} remaining</span>
+        </div>
+        
+        <div className="card-display">
+          <div className="card-question">{currentCard.front}</div>
+          {showAnswer && (
+            <>
+              <div className="card-divider" />
+              <div className="card-answer">{currentCard.back}</div>
+            </>
+          )}
+          {!showAnswer && (
+            <button className="show-answer-btn" onClick={() => setShowAnswer(true)}>
+              Show Answer
+            </button>
+          )}
+        </div>
+
+        {showAnswer && (
+          <div className="answer-buttons">
+            <button className="answer-btn again" onClick={() => handleReview(0)}>
+              Again<span className="interval">&lt;1m</span>
+            </button>
+            <button className="answer-btn hard" onClick={() => handleReview(2)}>
+              Hard<span className="interval">6m</span>
+            </button>
+            <button className="answer-btn good" onClick={() => handleReview(3)}>
+              Good<span className="interval">10m</span>
+            </button>
+            <button className="answer-btn easy" onClick={() => handleReview(5)}>
+              Easy<span className="interval">4d</span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <nav className="top-nav">
+        <div className="nav-left">
+          <button className={`nav-btn ${currentView === "decks" ? "active" : ""}`} onClick={() => setCurrentView("decks")}>
+            Decks
+          </button>
+          <button className={`nav-btn ${currentView === "add" ? "active" : ""}`} onClick={() => setCurrentView("add")}>
+            Add
+          </button>
+          <button className={`nav-btn ${currentView === "browse" ? "active" : ""}`} onClick={() => setCurrentView("browse")}>
+            Browse
+          </button>
+          <button className={`nav-btn ${currentView === "stats" ? "active" : ""}`} onClick={() => setCurrentView("stats")}>
+            Stats
+          </button>
+        </div>
+        <div className="nav-right">
+          {syncing && <span className="sync-indicator">Syncing...</span>}
+          {user ? (
+            <>
+              <span className="user-badge">{user.email}</span>
+              <button className="nav-btn" onClick={handleSync}>Sync</button>
+              <button className="nav-btn" onClick={() => signOut(auth)}>Sign Out</button>
+            </>
+          ) : (
+            <button className="nav-btn" onClick={() => setCurrentView("auth")}>Sign In</button>
+          )}
+        </div>
+      </nav>
+
+      <div className="main-container">
+        {currentView === "decks" && (
+          <>
+            <div className="deck-list-header">
+              <span>Deck</span>
+              <span style={{textAlign:"center"}}>New</span>
+              <span style={{textAlign:"center"}}>Learn</span>
+              <span style={{textAlign:"center"}}>Due</span>
+            </div>
+            <ul className="deck-list">
+              <li className="deck-item" onClick={() => reviewQueue.length > 0 && setStudying(true)}>
+                <span className="deck-name">Default Deck</span>
+                <span className="count-new">{Math.min(newCards.length, settings.newCardsPerDay)}</span>
+                <span className="count-learn">{learnCards.length}</span>
+                <span className="count-due">{dueCards.length}</span>
+              </li>
+            </ul>
+            <div className="bottom-bar">
+              <button className="bottom-btn" onClick={() => setCurrentView("add")}>Create Deck</button>
+              <button className="bottom-btn" onClick={() => setCurrentView("add")}>Import File</button>
+            </div>
+            {reviewQueue.length === 0 && (
+              <div className="empty-state">
+                <p>No cards due for review. Add some cards to get started!</p>
+              </div>
+            )}
+          </>
+        )}
+
+        {currentView === "add" && (
+          <div className="add-form-container">
+            <div className="form-section">
+              <h3>Add New Card</h3>
+              <form onSubmit={handleAddCard}>
+                <div className="form-field">
+                  <label>Front</label>
+                  <textarea rows={3} value={front} onChange={e => setFront(e.target.value)} placeholder="Question or term" />
+                </div>
+                <div className="form-field">
+                  <label>Back</label>
+                  <textarea rows={4} value={back} onChange={e => setBack(e.target.value)} placeholder="Answer or definition" />
+                </div>
+                <div className="form-actions">
+                  <button type="submit" className="btn-primary">Add Card</button>
+                </div>
+              </form>
+            </div>
+
+            <div className="form-section">
+              <h3>Bulk Import</h3>
+              <form onSubmit={handleBulkImport}>
+                <div className="form-field">
+                  <label>Tab-separated (front→back per line)</label>
+                  <textarea rows={6} value={bulkText} onChange={e => setBulkText(e.target.value)} 
+                    placeholder={"Question 1\tAnswer 1\nQuestion 2\tAnswer 2"} />
+                </div>
+                <div className="form-actions">
+                  <button type="submit" className="btn-primary">Import</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {currentView === "browse" && (
+          <>
+            <div className="browse-header">
+              <input className="search-input" type="text" placeholder="Search cards..."
+                value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+            </div>
+            <div className="card-table">
+              <div className="card-table-header">
+                <span>Front</span>
+                <span>Back</span>
+                <span>Due</span>
+                <span>Action</span>
+              </div>
+              {cards
+                .filter(c => !searchQuery || c.front.toLowerCase().includes(searchQuery.toLowerCase()) || c.back.toLowerCase().includes(searchQuery.toLowerCase()))
+                .slice(0, 100)
+                .map(card => (
+                  <div key={card.id} className="card-row">
+                    <span className="front">{card.front}</span>
+                    <span className="back">{card.back}</span>
+                    <span className="due-date">{formatDate(card.dueDate)}</span>
+                    <button className="delete-btn" onClick={() => handleDelete(card.id)}>Delete</button>
+                  </div>
+                ))}
+              {cards.length === 0 && (
+                <div className="empty-state">No cards yet. Add some to get started!</div>
+              )}
+            </div>
+          </>
+        )}
+
+        {currentView === "stats" && <StatsView history={reviewHistory} cards={cards} />}
+
+        {currentView === "auth" && <AuthView onSuccess={() => setCurrentView("decks")} />}
+      </div>
+    </>
+  );
+}
+
+function StatsView({ history, cards }) {
+  const stats = useMemo(() => {
+    const days = [];
+    const today = new Date();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const key = getDateKey(d);
+      days.push({ key, label: d.getDate(), count: history[key] || 0 });
+    }
+    const total = Object.values(history).reduce((s, n) => s + n, 0);
+    const activeDays = Object.keys(history).length;
+    const avg = activeDays ? (total / activeDays).toFixed(1) : 0;
+    
+    let streak = 0;
+    const check = new Date(today);
+    while (true) {
+      const k = getDateKey(check);
+      if (history[k] > 0) { streak++; check.setDate(check.getDate() - 1); }
+      else if (streak === 0) { check.setDate(check.getDate() - 1); }
+      else break;
+    }
+    
+    const max = Math.max(...days.map(d => d.count), 1);
+    return { days, total, avg, streak, max, cardCount: cards.length };
+  }, [history, cards]);
+
+  return (
+    <>
+      <div className="stats-grid">
+        <div className="stat-box">
+          <div className="stat-value">{stats.total}</div>
+          <div className="stat-label">Total Reviews</div>
+        </div>
+        <div className="stat-box">
+          <div className="stat-value">{stats.avg}</div>
+          <div className="stat-label">Avg/Day</div>
+        </div>
+        <div className="stat-box">
+          <div className="stat-value">{stats.streak}🔥</div>
+          <div className="stat-label">Streak</div>
+        </div>
+        <div className="stat-box">
+          <div className="stat-value">{stats.cardCount}</div>
+          <div className="stat-label">Total Cards</div>
+        </div>
+      </div>
+      <div className="chart-section">
+        <div className="chart-title">Reviews (Last 30 Days)</div>
+        <div className="bar-chart">
+          {stats.days.map(day => (
+            <div key={day.key} className="bar-col">
+              <div className="bar" style={{ height: `${(day.count / stats.max) * 100}%` }} title={`${day.count} reviews`} />
+              {day.label % 5 === 0 && <span className="bar-label">{day.label}</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function AuthView({ onSuccess }) {
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(""); setLoading(true);
+    try {
+      if (isSignUp) await createUserWithEmailAndPassword(auth, email, password);
+      else await signInWithEmailAndPassword(auth, email, password);
+      onSuccess();
+    } catch (err) {
+      const msgs = {
+        "auth/email-already-in-use": "Email already registered",
+        "auth/invalid-email": "Invalid email",
+        "auth/weak-password": "Password must be 6+ characters",
+        "auth/user-not-found": "No account found",
+        "auth/wrong-password": "Incorrect password",
+        "auth/invalid-credential": "Invalid credentials"
+      };
+      setError(msgs[err.code] || err.message);
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div className="auth-container">
+      <div className="auth-box">
+        <h2 className="auth-title">{isSignUp ? "Create Account" : "Sign In"}</h2>
+        <form className="auth-form" onSubmit={handleSubmit}>
+          {error && <div className="auth-error">{error}</div>}
+          <div className="form-field">
+            <label>Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required />
+          </div>
+          <div className="form-field">
+            <label>Password</label>
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={6} />
+          </div>
+          <button type="submit" className="btn-primary" disabled={loading}>
+            {loading ? "Loading..." : (isSignUp ? "Sign Up" : "Sign In")}
+          </button>
+        </form>
+        <div className="auth-switch">
+          {isSignUp ? "Have an account? " : "Need an account? "}
+          <button onClick={() => setIsSignUp(!isSignUp)}>{isSignUp ? "Sign In" : "Sign Up"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,22 @@
+- [x] Verify that the copilot-instructions.md file in the .github directory is created.
+- [x] Clarify Project Requirements
+  - React app with flashcard creation (front/back) and SM-2 review scheduling.
+- [x] Scaffold the Project
+  - Manual Vite-style scaffold completed in `.` because Node/npm/npx are not available in this environment.
+- [x] Customize the Project
+  - Implemented flashcard CRUD, due queue, SM-2 scoring (0-5), localStorage persistence, and responsive UI.
+- [x] Install Required Extensions
+  - No extensions required by project setup info.
+- [x] Compile the Project
+  - Dependencies installed and production build succeeded with Vite.
+- [x] Create and Run Task
+  - Created and ran VS Code task `Run Vite Dev Server`.
+- [x] Launch the Project
+  - Debug launch started after user confirmation.
+- [x] Ensure Documentation is Complete
+  - `README.md` exists and was updated.
+  - `.github/copilot-instructions.md` exists and HTML comments were removed.
+
+- Work through each checklist item systematically.
+- Keep communication concise and focused.
+- Follow development best practices.
