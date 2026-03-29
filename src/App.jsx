@@ -318,7 +318,7 @@ export default function App() {
   const todayKey = getDateKey(nowMs);
   const reviewedToday = reviewedByDay[todayKey] || 0;
   const progress = Math.min(100, Math.round((reviewedToday / Math.max(1, dailyGoal)) * 100));
-  const ringRadius = 62;
+  const ringRadius = 66;
   const ringCirc = 2 * Math.PI * ringRadius;
   const ringOffset = ringCirc * (1 - progress / 100);
 
@@ -1093,7 +1093,7 @@ export default function App() {
       {view === "Decks" && (
         <main className="home">
           <section className="progress-panel">
-            <svg width="180" height="180" viewBox="0 0 160 160">
+            <svg className="progress-ring" width="220" height="220" viewBox="0 0 160 160">
               <circle className="ring-bg" cx="80" cy="80" r={ringRadius} />
               <circle
                 className="ring-progress"
