@@ -6,10 +6,10 @@ import {
   signInWithEmailAndPassword,
   signOut
 } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, writeBatch } from "firebase/firestore";
 
 const STORAGE_KEY = "sr_flashcards_state_v1";
-const NAV_ITEMS = ["Decks", "Add", "Browse", "Stats", "Personalization"];
+const NAV_ITEMS = ["Decks", "Add", "Browse", "Stats", "Settings"];
 const DEFAULT_DAILY_GOAL = 20;
 const DEFAULT_REVIEW_SETTINGS = { dailyReviewLimit: 200, newCardsPerDay: 20 };
 
@@ -55,8 +55,18 @@ function createCard(front, back, deckId) {
     nextReview: null,
     lapses: 0,
     reviews: [],
-    notes: []
+    notes: [],
+    dirty: true
   };
+}
+
+function markCardDirty(card) {
+  return { ...card, dirty: true };
+}
+
+function markCardClean(card) {
+  const { dirty, ...rest } = card;
+  return rest;
 }
 
 function getDateKey(ts = Date.now()) {
@@ -231,6 +241,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState(loaded?.lastSyncedAt || null);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | done
+  const [dirtyDecks, setDirtyDecks] = useState(true);
+  const [localLastModified, setLocalLastModified] = useState(loaded?.localLastModified || null);
   const [authMode, setAuthMode] = useState("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -253,6 +266,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const nowIso = new Date().toISOString();
+    setLocalLastModified(nowIso);
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -265,7 +280,8 @@ export default function App() {
         reviewedByDay,
         activeDeckId,
         view,
-        lastSyncedAt
+        lastSyncedAt,
+        localLastModified: nowIso
       })
     );
   }, [decks, cards, dailyGoal, reviewSettings, themeId, customColor, reviewedByDay, activeDeckId, view, lastSyncedAt]);
@@ -529,21 +545,53 @@ export default function App() {
 
   async function syncToFirestore(allowUIUpdate = true) {
     if (!user) return;
-    if (allowUIUpdate) setSyncBusy(true);
+    if (allowUIUpdate) {
+      setSyncBusy(true);
+      setSyncStatus("syncing");
+    }
     const nowIso = new Date().toISOString();
-    const payload = {
-      decks,
-      cards,
-      dailyGoal,
-      reviewSettings,
-      themeId,
-      reviewedByDay,
-      activeDeckId,
-      lastSyncedAt: nowIso
-    };
+
+    // Determine what's dirty
+    const dirtyCards = cards.filter((card) => card.dirty);
+    const hasChanges = dirtyCards.length > 0 || dirtyDecks;
+
     try {
-      await setDoc(doc(db, "users", user.uid), payload, { merge: true });
+      if (hasChanges) {
+        // Use batch write for efficiency
+        const batch = writeBatch(db);
+        const userDocRef = doc(db, "users", user.uid);
+
+        // Clean cards before uploading (remove dirty flag)
+        const cleanedCards = cards.map(markCardClean);
+
+        const payload = {
+          decks,
+          cards: cleanedCards,
+          dailyGoal,
+          reviewSettings,
+          themeId,
+          customColor,
+          reviewedByDay,
+          activeDeckId,
+          lastSyncedAt: nowIso,
+          localLastModified: nowIso
+        };
+
+        batch.set(userDocRef, payload, { merge: true });
+        await batch.commit();
+
+        // Mark all cards as clean in local state
+        setCards((prev) => prev.map(markCardClean));
+        setDirtyDecks(false);
+      }
       setLastSyncedAt(nowIso);
+      if (allowUIUpdate) {
+        setSyncStatus("done");
+        setTimeout(() => setSyncStatus("idle"), 2000);
+      }
+    } catch (err) {
+      console.error("Sync failed:", err);
+      if (allowUIUpdate) setSyncStatus("idle");
     } finally {
       if (allowUIUpdate) setSyncBusy(false);
     }
@@ -612,6 +660,7 @@ export default function App() {
     if (!name) return;
     const deck = { id: crypto.randomUUID(), name, icon: null };
     setDecks((prev) => [deck, ...prev]);
+    setDirtyDecks(true);
     setActiveDeckId(deck.id);
     setDeckInput(deck.id);
     setNewDeckName("");
@@ -625,6 +674,7 @@ export default function App() {
     const nextName = value.trim();
     if (!nextName) return;
     setDecks((prev) => prev.map((deck) => (deck.id === deckId ? { ...deck, name: nextName } : deck)));
+    setDirtyDecks(true);
   }
 
   function deleteDeck(deckId) {
@@ -638,6 +688,7 @@ export default function App() {
     const remainingDecks = decks.filter((d) => d.id !== deckId);
     const safeNextDeck = remainingDecks[0];
     setDecks(remainingDecks);
+    setDirtyDecks(true);
     setCards((prev) => prev.filter((card) => card.deckId !== deckId));
     if (activeDeckId === deckId) setActiveDeckId(safeNextDeck.id);
     if (deckInput === deckId) setDeckInput(safeNextDeck.id);
@@ -674,6 +725,7 @@ export default function App() {
       const icon = typeof reader.result === "string" ? reader.result : null;
       if (!icon) return;
       setDecks((prev) => prev.map((deck) => (deck.id === deckId ? { ...deck, icon } : deck)));
+      setDirtyDecks(true);
     };
     reader.readAsDataURL(file);
   }
@@ -683,7 +735,7 @@ export default function App() {
     const reviewLog = { at: new Date(now).toISOString(), grade: gradeLabel };
 
     if (gradeLabel === "Again") {
-      return {
+      return markCardDirty({
         ...card,
         state: "learning",
         learningStep: 0,
@@ -693,10 +745,10 @@ export default function App() {
         easeFactor: Math.max(1.3, Number((card.easeFactor - 0.2).toFixed(2))),
         lapses: card.lapses + 1,
         reviews: [...card.reviews, reviewLog]
-      };
+      });
     }
     if (gradeLabel === "Hard") {
-      return {
+      return markCardDirty({
         ...card,
         state: "learning",
         learningStep: 1,
@@ -705,11 +757,11 @@ export default function App() {
         interval: 1,
         easeFactor: Math.max(1.3, Number((card.easeFactor - 0.1).toFixed(2))),
         reviews: [...card.reviews, reviewLog]
-      };
+      });
     }
     if (gradeLabel === "Good") {
       if (card.state === "learning" && card.learningStep >= 1) {
-        return {
+        return markCardDirty({
           ...card,
           state: "review",
           learningStep: 0,
@@ -718,9 +770,9 @@ export default function App() {
           nextReview: new Date(now + Math.max(1, card.interval) * 24 * 60 * 60 * 1000).toISOString(),
           easeFactor: Number((card.easeFactor + 0.05).toFixed(2)),
           reviews: [...card.reviews, reviewLog]
-        };
+        });
       }
-      return {
+      return markCardDirty({
         ...card,
         state: "learning",
         learningStep: 1,
@@ -729,9 +781,9 @@ export default function App() {
         interval: 1,
         easeFactor: Number((card.easeFactor + 0.03).toFixed(2)),
         reviews: [...card.reviews, reviewLog]
-      };
+      });
     }
-    return {
+    return markCardDirty({
       ...card,
       state: "review",
       learningStep: 0,
@@ -740,7 +792,7 @@ export default function App() {
       nextReview: new Date(now + 4 * 24 * 60 * 60 * 1000).toISOString(),
       easeFactor: Number((card.easeFactor + 0.15).toFixed(2)),
       reviews: [...card.reviews, reviewLog]
-    };
+    });
   }
 
   function gradeCurrentCard(gradeLabel) {
@@ -764,11 +816,11 @@ export default function App() {
     setCards((prev) =>
       prev.map((card) =>
         card.id === activeReviewCard.id
-          ? {
+          ? markCardDirty({
               ...card,
               front: nextFront,
               back: nextBack
-            }
+            })
           : card
       )
     );
@@ -782,10 +834,10 @@ export default function App() {
     setCards((prev) =>
       prev.map((card) =>
         card.id === activeReviewCard.id
-          ? {
+          ? markCardDirty({
             ...card,
             notes: [...(Array.isArray(card.notes) ? card.notes : []), note]
-          }
+          })
           : card
       )
     );
@@ -876,25 +928,39 @@ export default function App() {
       setUser(nextUser);
       setAuthLoading(false);
       if (!nextUser) return;
+
       const userRef = doc(db, "users", nextUser.uid);
       const snap = await getDoc(userRef);
       if (!snap.exists()) return;
+
       const cloud = snap.data();
-      if (Array.isArray(cloud.decks)) setDecks(cloud.decks);
-      if (Array.isArray(cloud.cards)) setCards(cloud.cards);
-      if (typeof cloud.dailyGoal === "number") setDailyGoal(cloud.dailyGoal);
-      if (cloud.reviewSettings) {
-        setReviewSettings({
-          dailyReviewLimit: cloud.reviewSettings.dailyReviewLimit || DEFAULT_REVIEW_SETTINGS.dailyReviewLimit,
-          newCardsPerDay: cloud.reviewSettings.newCardsPerDay || DEFAULT_REVIEW_SETTINGS.newCardsPerDay
-        });
+      const cloudLastModified = cloud.localLastModified || cloud.lastSyncedAt || null;
+      const localData = loadState();
+      const localLastMod = localData?.localLastModified || null;
+
+      // Only download if localStorage is empty OR Firestore data is newer
+      const localIsEmpty = !localData || !Array.isArray(localData.cards) || localData.cards.length === 0;
+      const cloudIsNewer = cloudLastModified && (!localLastMod || cloudLastModified > localLastMod);
+
+      if (localIsEmpty || cloudIsNewer) {
+        if (Array.isArray(cloud.decks)) setDecks(cloud.decks);
+        if (Array.isArray(cloud.cards)) setCards(cloud.cards.map(markCardClean));
+        if (typeof cloud.dailyGoal === "number") setDailyGoal(cloud.dailyGoal);
+        if (cloud.reviewSettings) {
+          setReviewSettings({
+            dailyReviewLimit: cloud.reviewSettings.dailyReviewLimit || DEFAULT_REVIEW_SETTINGS.dailyReviewLimit,
+            newCardsPerDay: cloud.reviewSettings.newCardsPerDay || DEFAULT_REVIEW_SETTINGS.newCardsPerDay
+          });
+        }
+        if (typeof cloud.themeId === "string") setThemeId(cloud.themeId);
+        if (typeof cloud.customColor === "string") setCustomColor(cloud.customColor);
+        if (cloud.reviewedByDay && typeof cloud.reviewedByDay === "object") setReviewedByDay(cloud.reviewedByDay);
+        if (typeof cloud.activeDeckId === "string") setActiveDeckId(cloud.activeDeckId);
+        if (typeof cloud.view === "string") setView(cloud.view);
+        if (typeof cloud.lastSyncedAt === "string") setLastSyncedAt(cloud.lastSyncedAt);
+        if (typeof cloud.localLastModified === "string") setLocalLastModified(cloud.localLastModified);
+        setDirtyDecks(false);
       }
-      if (typeof cloud.themeId === "string") setThemeId(cloud.themeId);
-      if (typeof cloud.customColor === "string") setCustomColor(cloud.customColor);
-      if (cloud.reviewedByDay && typeof cloud.reviewedByDay === "object") setReviewedByDay(cloud.reviewedByDay);
-      if (typeof cloud.activeDeckId === "string") setActiveDeckId(cloud.activeDeckId);
-      if (typeof cloud.view === "string") setView(cloud.view);
-      if (typeof cloud.lastSyncedAt === "string") setLastSyncedAt(cloud.lastSyncedAt);
     });
     return () => unsub();
   }, []);
@@ -1072,8 +1138,9 @@ export default function App() {
           ))}
           {user ? (
             <>
-              <button className="nav-item" onClick={() => syncToFirestore(true)} disabled={syncBusy}>
-                {syncBusy ? "Syncing..." : "Sync"}
+              <button className="nav-item sync-btn" onClick={() => syncToFirestore(true)} disabled={syncBusy}>
+                {syncStatus === "syncing" && <span className="sync-spinner" />}
+                {syncStatus === "syncing" ? "Syncing..." : syncStatus === "done" ? "Synced ✓" : "Sync"}
               </button>
               <button className="nav-item" onClick={() => signOut(auth)}>
                 Sign Out
@@ -1489,82 +1556,24 @@ export default function App() {
         </main>
       )}
 
-      {view === "Personalization" && (
+      {view === "Settings" && (
         <main className="panel">
-          <h2>Personalization</h2>
-          <section className="stats-section">
-            <h3>Theme Colors</h3>
-            <div className="theme-grid">
-              {THEME_OPTIONS.map((theme) => (
-                <button
-                  key={theme.id}
-                  className={`theme-circle ${themeId === theme.id ? "active" : ""}`}
-                  title={theme.name}
-                  type="button"
-                  style={{ background: theme.id === "white" ? "#ffffff" : theme.id === "black" ? "#000000" : theme.accent }}
-                  onClick={() => setThemeId(theme.id)}
-                >
-                  <span>{theme.name}</span>
-                </button>
-              ))}
-              <label className={`theme-circle custom ${themeId === "custom" ? "active" : ""}`} title="Custom color">
-                <input
-                  type="color"
-                  value={customColor}
-                  onChange={(event) => {
-                    setCustomColor(event.target.value);
-                    setThemeId("custom");
-                  }}
-                />
-                <span>Custom</span>
-              </label>
-            </div>
-          </section>
+          <h2>Settings</h2>
 
-          <section className="stats-section">
-            <h3>Settings</h3>
-            <div className="setting-card">
-              <div>
-                <strong>Daily review limit</strong>
-                <p>Maximum number of cards shown in a review session. Default is 200.</p>
-              </div>
-              <div className="stepper">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setReviewSettings((prev) => ({
-                      ...prev,
-                      dailyReviewLimit: Math.max(1, prev.dailyReviewLimit - 1)
-                    }))
-                  }
-                >
-                  −
-                </button>
-                <input
-                  type="number"
-                  min={1}
-                  value={reviewSettings.dailyReviewLimit}
-                  onChange={(event) =>
-                    setReviewSettings((prev) => ({
-                      ...prev,
-                      dailyReviewLimit: Math.max(1, Number(event.target.value) || 1)
-                    }))
-                  }
-                />
-                <button
-                  type="button"
-                  onClick={() =>
-                    setReviewSettings((prev) => ({
-                      ...prev,
-                      dailyReviewLimit: prev.dailyReviewLimit + 1
-                    }))
-                  }
-                >
-                  +
+          {user && (
+            <section className="stats-section account-section">
+              <h3>Account</h3>
+              <div className="account-row">
+                <span className="account-email">{user.email}</span>
+                <button className="mini-btn danger" onClick={() => signOut(auth)}>
+                  Sign Out
                 </button>
               </div>
-            </div>
+            </section>
+          )}
 
+          <section className="stats-section">
+            <h3>Daily Limits</h3>
             <div className="setting-card">
               <div>
                 <strong>New cards per day</strong>
@@ -1605,6 +1614,77 @@ export default function App() {
                   +
                 </button>
               </div>
+            </div>
+
+            <div className="setting-card">
+              <div>
+                <strong>Maximum reviews per day</strong>
+                <p>Maximum number of cards shown in a review session. Default is 200.</p>
+              </div>
+              <div className="stepper">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setReviewSettings((prev) => ({
+                      ...prev,
+                      dailyReviewLimit: Math.max(1, prev.dailyReviewLimit - 1)
+                    }))
+                  }
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  min={1}
+                  value={reviewSettings.dailyReviewLimit}
+                  onChange={(event) =>
+                    setReviewSettings((prev) => ({
+                      ...prev,
+                      dailyReviewLimit: Math.max(1, Number(event.target.value) || 1)
+                    }))
+                  }
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setReviewSettings((prev) => ({
+                      ...prev,
+                      dailyReviewLimit: prev.dailyReviewLimit + 1
+                    }))
+                  }
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="stats-section">
+            <h3>Theme Colors</h3>
+            <div className="theme-grid">
+              {THEME_OPTIONS.map((theme) => (
+                <button
+                  key={theme.id}
+                  className={`theme-circle ${themeId === theme.id ? "active" : ""}`}
+                  title={theme.name}
+                  type="button"
+                  style={{ background: theme.id === "white" ? "#ffffff" : theme.id === "black" ? "#000000" : theme.accent }}
+                  onClick={() => setThemeId(theme.id)}
+                >
+                  <span>{theme.name}</span>
+                </button>
+              ))}
+              <label className={`theme-circle custom ${themeId === "custom" ? "active" : ""}`} title="Custom color">
+                <input
+                  type="color"
+                  value={customColor}
+                  onChange={(event) => {
+                    setCustomColor(event.target.value);
+                    setThemeId("custom");
+                  }}
+                />
+                <span>Custom</span>
+              </label>
             </div>
           </section>
         </main>

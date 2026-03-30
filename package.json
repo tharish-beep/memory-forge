@@ -11,10 +11,15 @@
   "dependencies": {
     "firebase": "^10.8.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "sast-scan": "^2.1.0",
+    "undici": "^7.24.6"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.1",
     "vite": "^8.0.3"
+  },
+  "overrides": {
+    "undici": "^7.24.6"
   }
 }
