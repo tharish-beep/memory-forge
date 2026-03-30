@@ -589,11 +589,28 @@ export default function App() {
     setSyncBusy(true);
     setSyncStatus("syncing");
 
+    const startTime = performance.now();
+    console.log("[Sync] Starting...");
+
     try {
       const nowIso = new Date().toISOString();
+      
+      // Strip out large base64 icons to speed up sync
+      const decksWithoutIcons = decks.map(({ icon, ...rest }) => rest);
+      
+      // Keep cards minimal
+      const lightCards = cards.map((card) => {
+        const { reviews, notes, ...rest } = card;
+        return {
+          ...rest,
+          reviews: (reviews || []).slice(-3),
+          notes: (notes || []).slice(-2)
+        };
+      });
+
       const payload = {
-        decks,
-        cards,
+        decks: decksWithoutIcons,
+        cards: lightCards,
         dailyGoal,
         reviewSettings,
         themeId,
@@ -603,11 +620,28 @@ export default function App() {
         lastSyncedAt: nowIso
       };
 
-      await setDoc(doc(db, "users", user.uid), payload);
+      console.log("[Sync] Payload size:", JSON.stringify(payload).length, "bytes");
+      console.log("[Sync] Cards:", lightCards.length, "Decks:", decksWithoutIcons.length);
+
+      // Add timeout - fail if takes more than 10 seconds
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Sync timeout after 10s")), 10000)
+      );
+      
+      console.log("[Sync] Calling setDoc...");
+      await Promise.race([
+        setDoc(doc(db, "users", user.uid), payload),
+        timeoutPromise
+      ]);
+      
+      const elapsed = Math.round(performance.now() - startTime);
+      console.log("[Sync] Completed in", elapsed, "ms");
+      
       setLastSyncedAt(nowIso);
       setSyncStatus("done");
     } catch (err) {
-      console.error("Sync failed:", err);
+      const elapsed = Math.round(performance.now() - startTime);
+      console.error("[Sync] Failed after", elapsed, "ms:", err.message || err);
       setSyncStatus("error");
     } finally {
       setSyncBusy(false);
@@ -948,7 +982,13 @@ export default function App() {
         if (!snap.exists()) return;
 
         const cloud = snap.data();
-        if (Array.isArray(cloud.decks)) setDecks(cloud.decks);
+        // Merge cloud decks with local icons (icons stay local only)
+        if (Array.isArray(cloud.decks)) {
+          const localDecks = loadState()?.decks || [];
+          const iconMap = {};
+          localDecks.forEach((d) => { if (d.icon) iconMap[d.id] = d.icon; });
+          setDecks(cloud.decks.map((d) => ({ ...d, icon: iconMap[d.id] || d.icon || null })));
+        }
         if (Array.isArray(cloud.cards)) setCards(cloud.cards);
         if (typeof cloud.dailyGoal === "number") setDailyGoal(cloud.dailyGoal);
         if (cloud.reviewSettings) {
@@ -1208,7 +1248,7 @@ export default function App() {
               <span className="streak-icon">🔥</span>
               <span className="streak-count">{statsData.streak} day streak</span>
             </div>
-            <button className="primary-btn" onClick={() => startReviewSession(activeDeckId)}>
+            <button className="primary-btn pulse-glow" onClick={() => startReviewSession(activeDeckId)}>
               Start Reviewing
             </button>
           </section>
