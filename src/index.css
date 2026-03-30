@@ -101,35 +101,27 @@ body {
   transition: all 0.2s ease;
 }
 
-.ring-bg {
-  fill: none;
-  stroke: #222;
-  stroke-width: 10;
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  width: 100%;
 }
 
-.ring-progress {
-  fill: none;
-  stroke: var(--accent, #4f46e5);
-  stroke-width: 10;
-  transform: rotate(-90deg);
-  transform-origin: 50% 50%;
-  stroke-linecap: round;
-  transition: stroke-dashoffset 0.3s ease;
+.chart-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #e0e0e0;
 }
 
-.progress-ring {
-  filter: drop-shadow(0 0 16px color-mix(in srgb, var(--accent, #4f46e5) 50%, transparent));
+.chart-today {
+  font-size: 0.95rem;
+  color: #a0a0a0;
 }
 
-.ring-value {
-  fill: #fff;
-  font-size: 1.85rem;
-  font-weight: 700;
-}
-
-.ring-sub {
-  fill: #bbb;
-  font-size: 0.9rem;
+.activity-chart {
+  width: 100%;
+  margin: 0.5rem 0;
 }
 
 .primary-btn {

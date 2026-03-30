@@ -7,6 +7,14 @@ import {
   signOut
 } from "firebase/auth";
 import { doc, getDoc, setDoc, writeBatch } from "firebase/firestore";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer
+} from "recharts";
 
 const STORAGE_KEY = "sr_flashcards_state_v1";
 const NAV_ITEMS = ["Decks", "Add", "Browse", "Stats", "Settings"];
@@ -333,10 +341,22 @@ export default function App() {
   const nowMs = Date.now();
   const todayKey = getDateKey(nowMs);
   const reviewedToday = reviewedByDay[todayKey] || 0;
-  const progress = Math.min(100, Math.round((reviewedToday / Math.max(1, dailyGoal)) * 100));
-  const ringRadius = 66;
-  const ringCirc = 2 * Math.PI * ringRadius;
-  const ringOffset = ringCirc * (1 - progress / 100);
+
+  // Build chart data for last 14 days
+  const chartData = useMemo(() => {
+    const data = [];
+    for (let i = 13; i >= 0; i--) {
+      const dayMs = nowMs - i * 24 * 60 * 60 * 1000;
+      const key = getDateKey(dayMs);
+      const date = new Date(dayMs);
+      const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      data.push({
+        date: label,
+        cards: reviewedByDay[key] || 0
+      });
+    }
+    return data;
+  }, [reviewedByDay, nowMs]);
 
   const deckStats = useMemo(() => {
     const stats = {};
@@ -1153,23 +1173,53 @@ export default function App() {
       {view === "Decks" && (
         <main className="home">
           <section className="progress-panel">
-            <svg className="progress-ring" width="220" height="220" viewBox="0 0 160 160">
-              <circle className="ring-bg" cx="80" cy="80" r={ringRadius} />
-              <circle
-                className="ring-progress"
-                cx="80"
-                cy="80"
-                r={ringRadius}
-                strokeDasharray={ringCirc}
-                strokeDashoffset={ringOffset}
-              />
-              <text x="80" y="75" textAnchor="middle" className="ring-value">
-                {reviewedToday}
-              </text>
-              <text x="80" y="96" textAnchor="middle" className="ring-sub">
-                / {dailyGoal}
-              </text>
-            </svg>
+            <div className="chart-header">
+              <span className="chart-title">Cards Reviewed</span>
+              <span className="chart-today">{reviewedToday} today</span>
+            </div>
+            <div className="activity-chart">
+              <ResponsiveContainer width="100%" height={180}>
+                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#7c3aed" stopOpacity={0.5} />
+                      <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.05} />
+                    </linearGradient>
+                  </defs>
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fill: "#888", fontSize: 11 }}
+                    axisLine={{ stroke: "#333" }}
+                    tickLine={false}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    tick={{ fill: "#888", fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    allowDecimals={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: "#1a1a1a",
+                      border: "1px solid #333",
+                      borderRadius: "10px",
+                      color: "#fff"
+                    }}
+                    labelStyle={{ color: "#aaa" }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="cards"
+                    stroke="#7c3aed"
+                    strokeWidth={2.5}
+                    fill="url(#chartGradient)"
+                    dot={{ r: 4, fill: "#7c3aed", stroke: "#fff", strokeWidth: 1.5 }}
+                    activeDot={{ r: 6, fill: "#a78bfa", stroke: "#fff", strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
             <button className="primary-btn" onClick={() => startReviewSession(activeDeckId)}>
               Start Reviewing
             </button>
