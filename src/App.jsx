@@ -170,12 +170,25 @@ function buildDeckCounts(cards, deckId, nowMs) {
   return { newCount, learnCount, dueCount };
 }
 
+// Fisher-Yates shuffle algorithm
+function shuffleArray(arr) {
+  const shuffled = [...arr];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
 function buildSessionQueue(cards, deckId, nowMs, limits = DEFAULT_REVIEW_SETTINGS) {
   const inDeck = cards.filter((card) => card.deckId === deckId);
-  const newCards = inDeck
-    .filter((card) => card.state === "new")
+  // Shuffle new cards randomly using Fisher-Yates
+  const newCards = shuffleArray(
+    inDeck.filter((card) => card.state === "new")
+  )
     .slice(0, Math.max(1, limits.newCardsPerDay))
     .map((card) => card.id);
+  // Learning and review cards stay sorted by due time
   const learningDue = inDeck
     .filter((card) => card.state === "learning" && card.dueTime && card.dueTime <= nowMs)
     .sort((a, b) => a.dueTime - b.dueTime)
@@ -255,6 +268,7 @@ export default function App() {
   const [deckDetailQuery, setDeckDetailQuery] = useState("");
   const [reviewTick, setReviewTick] = useState(0);
   const [clockTick, setClockTick] = useState(0);
+  const [statsTick, setStatsTick] = useState(0);
   const [newDeckName, setNewDeckName] = useState("");
   const [showNewDeckModal, setShowNewDeckModal] = useState(false);
   const [statsOpen, setStatsOpen] = useState({
@@ -314,6 +328,15 @@ export default function App() {
       })
     );
   }, [decks, cards, dailyGoal, reviewSettings, themeId, customColor, reviewedByDay, activeDeckId, view, lastSyncedAt]);
+
+  // Periodically update clockTick to refresh deck counts on home screen
+  useEffect(() => {
+    if (inReview) return undefined;
+    const timer = setInterval(() => {
+      setClockTick((n) => n + 1);
+    }, 10000); // Every 10 seconds
+    return () => clearInterval(timer);
+  }, [inReview]);
 
   useEffect(() => {
     if (!inReview) return undefined;
@@ -385,7 +408,7 @@ export default function App() {
       stats[deck.id] = buildDeckCounts(cards, deck.id, Date.now());
     });
     return stats;
-  }, [cards, decks, reviewTick, clockTick]);
+  }, [cards, decks, reviewTick, clockTick, statsTick]);
 
   const currentCard = useMemo(() => {
     const cardId = queue[0];
@@ -853,6 +876,8 @@ export default function App() {
     setShowAnswer(false);
     setIsEditingCard(false);
     setSessionAnsweredCount((n) => n + 1);
+    // Force deckStats recalculation
+    setStatsTick((n) => n + 1);
   }
 
   function saveCurrentEdit() {
