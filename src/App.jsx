@@ -6,7 +6,7 @@ import {
   signInWithEmailAndPassword,
   signOut
 } from "firebase/auth";
-import { doc, getDoc, setDoc, writeBatch } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import {
   AreaChart,
   Area,
@@ -68,13 +68,38 @@ function createCard(front, back, deckId) {
   };
 }
 
-function markCardDirty(card) {
-  return { ...card, dirty: true };
-}
+const LETTER_GRADIENTS = {
+  A: "linear-gradient(135deg, #f97316, #ea580c)",
+  B: "linear-gradient(135deg, #3b82f6, #2563eb)",
+  C: "linear-gradient(135deg, #14b8a6, #0d9488)",
+  D: "linear-gradient(135deg, #8b5cf6, #7c3aed)",
+  E: "linear-gradient(135deg, #ec4899, #db2777)",
+  F: "linear-gradient(135deg, #22c55e, #16a34a)",
+  G: "linear-gradient(135deg, #a855f7, #9333ea)",
+  H: "linear-gradient(135deg, #f59e0b, #d97706)",
+  I: "linear-gradient(135deg, #06b6d4, #0891b2)",
+  J: "linear-gradient(135deg, #ef4444, #dc2626)",
+  K: "linear-gradient(135deg, #84cc16, #65a30d)",
+  L: "linear-gradient(135deg, #6366f1, #4f46e5)",
+  M: "linear-gradient(135deg, #3b82f6, #1d4ed8)",
+  N: "linear-gradient(135deg, #f43f5e, #e11d48)",
+  O: "linear-gradient(135deg, #fb923c, #ea580c)",
+  P: "linear-gradient(135deg, #c084fc, #a855f7)",
+  Q: "linear-gradient(135deg, #2dd4bf, #14b8a6)",
+  R: "linear-gradient(135deg, #f87171, #ef4444)",
+  S: "linear-gradient(135deg, #22c55e, #15803d)",
+  T: "linear-gradient(135deg, #60a5fa, #3b82f6)",
+  U: "linear-gradient(135deg, #fbbf24, #f59e0b)",
+  V: "linear-gradient(135deg, #a78bfa, #8b5cf6)",
+  W: "linear-gradient(135deg, #34d399, #10b981)",
+  X: "linear-gradient(135deg, #fb7185, #f43f5e)",
+  Y: "linear-gradient(135deg, #facc15, #eab308)",
+  Z: "linear-gradient(135deg, #818cf8, #6366f1)"
+};
 
-function markCardClean(card) {
-  const { dirty, ...rest } = card;
-  return rest;
+function getLetterGradient(letter) {
+  const upper = (letter || "A").toUpperCase();
+  return LETTER_GRADIENTS[upper] || LETTER_GRADIENTS.A;
 }
 
 function getDateKey(ts = Date.now()) {
@@ -231,6 +256,7 @@ export default function App() {
   const [reviewTick, setReviewTick] = useState(0);
   const [clockTick, setClockTick] = useState(0);
   const [newDeckName, setNewDeckName] = useState("");
+  const [showNewDeckModal, setShowNewDeckModal] = useState(false);
   const [statsOpen, setStatsOpen] = useState({
     overview: true,
     dailyActivity: true,
@@ -249,9 +275,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState(loaded?.lastSyncedAt || null);
   const [syncBusy, setSyncBusy] = useState(false);
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | done
-  const [dirtyDecks, setDirtyDecks] = useState(true);
-  const [localLastModified, setLocalLastModified] = useState(loaded?.localLastModified || null);
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | done | error
   const [authMode, setAuthMode] = useState("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -274,8 +298,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const nowIso = new Date().toISOString();
-    setLocalLastModified(nowIso);
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -288,8 +310,7 @@ export default function App() {
         reviewedByDay,
         activeDeckId,
         view,
-        lastSyncedAt,
-        localLastModified: nowIso
+        lastSyncedAt
       })
     );
   }, [decks, cards, dailyGoal, reviewSettings, themeId, customColor, reviewedByDay, activeDeckId, view, lastSyncedAt]);
@@ -342,14 +363,14 @@ export default function App() {
   const todayKey = getDateKey(nowMs);
   const reviewedToday = reviewedByDay[todayKey] || 0;
 
-  // Build chart data for last 14 days
+  // Build chart data for last 7 days
   const chartData = useMemo(() => {
     const data = [];
-    for (let i = 13; i >= 0; i--) {
+    for (let i = 6; i >= 0; i--) {
       const dayMs = nowMs - i * 24 * 60 * 60 * 1000;
       const key = getDateKey(dayMs);
       const date = new Date(dayMs);
-      const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      const label = date.toLocaleDateString(undefined, { weekday: "short" });
       data.push({
         date: label,
         cards: reviewedByDay[key] || 0
@@ -563,57 +584,33 @@ export default function App() {
     );
   }
 
-  async function syncToFirestore(allowUIUpdate = true) {
+  async function syncToFirestore() {
     if (!user) return;
-    if (allowUIUpdate) {
-      setSyncBusy(true);
-      setSyncStatus("syncing");
-    }
-    const nowIso = new Date().toISOString();
-
-    // Determine what's dirty
-    const dirtyCards = cards.filter((card) => card.dirty);
-    const hasChanges = dirtyCards.length > 0 || dirtyDecks;
+    setSyncBusy(true);
+    setSyncStatus("syncing");
 
     try {
-      if (hasChanges) {
-        // Use batch write for efficiency
-        const batch = writeBatch(db);
-        const userDocRef = doc(db, "users", user.uid);
+      const nowIso = new Date().toISOString();
+      const payload = {
+        decks,
+        cards,
+        dailyGoal,
+        reviewSettings,
+        themeId,
+        customColor,
+        reviewedByDay,
+        activeDeckId,
+        lastSyncedAt: nowIso
+      };
 
-        // Clean cards before uploading (remove dirty flag)
-        const cleanedCards = cards.map(markCardClean);
-
-        const payload = {
-          decks,
-          cards: cleanedCards,
-          dailyGoal,
-          reviewSettings,
-          themeId,
-          customColor,
-          reviewedByDay,
-          activeDeckId,
-          lastSyncedAt: nowIso,
-          localLastModified: nowIso
-        };
-
-        batch.set(userDocRef, payload, { merge: true });
-        await batch.commit();
-
-        // Mark all cards as clean in local state
-        setCards((prev) => prev.map(markCardClean));
-        setDirtyDecks(false);
-      }
+      await setDoc(doc(db, "users", user.uid), payload);
       setLastSyncedAt(nowIso);
-      if (allowUIUpdate) {
-        setSyncStatus("done");
-        setTimeout(() => setSyncStatus("idle"), 2000);
-      }
+      setSyncStatus("done");
     } catch (err) {
       console.error("Sync failed:", err);
-      if (allowUIUpdate) setSyncStatus("idle");
+      setSyncStatus("error");
     } finally {
-      if (allowUIUpdate) setSyncBusy(false);
+      setSyncBusy(false);
     }
   }
 
@@ -680,7 +677,6 @@ export default function App() {
     if (!name) return;
     const deck = { id: crypto.randomUUID(), name, icon: null };
     setDecks((prev) => [deck, ...prev]);
-    setDirtyDecks(true);
     setActiveDeckId(deck.id);
     setDeckInput(deck.id);
     setNewDeckName("");
@@ -694,7 +690,6 @@ export default function App() {
     const nextName = value.trim();
     if (!nextName) return;
     setDecks((prev) => prev.map((deck) => (deck.id === deckId ? { ...deck, name: nextName } : deck)));
-    setDirtyDecks(true);
   }
 
   function deleteDeck(deckId) {
@@ -708,7 +703,6 @@ export default function App() {
     const remainingDecks = decks.filter((d) => d.id !== deckId);
     const safeNextDeck = remainingDecks[0];
     setDecks(remainingDecks);
-    setDirtyDecks(true);
     setCards((prev) => prev.filter((card) => card.deckId !== deckId));
     if (activeDeckId === deckId) setActiveDeckId(safeNextDeck.id);
     if (deckInput === deckId) setDeckInput(safeNextDeck.id);
@@ -745,7 +739,6 @@ export default function App() {
       const icon = typeof reader.result === "string" ? reader.result : null;
       if (!icon) return;
       setDecks((prev) => prev.map((deck) => (deck.id === deckId ? { ...deck, icon } : deck)));
-      setDirtyDecks(true);
     };
     reader.readAsDataURL(file);
   }
@@ -755,7 +748,7 @@ export default function App() {
     const reviewLog = { at: new Date(now).toISOString(), grade: gradeLabel };
 
     if (gradeLabel === "Again") {
-      return markCardDirty({
+      return {
         ...card,
         state: "learning",
         learningStep: 0,
@@ -765,10 +758,10 @@ export default function App() {
         easeFactor: Math.max(1.3, Number((card.easeFactor - 0.2).toFixed(2))),
         lapses: card.lapses + 1,
         reviews: [...card.reviews, reviewLog]
-      });
+      };
     }
     if (gradeLabel === "Hard") {
-      return markCardDirty({
+      return {
         ...card,
         state: "learning",
         learningStep: 1,
@@ -777,11 +770,11 @@ export default function App() {
         interval: 1,
         easeFactor: Math.max(1.3, Number((card.easeFactor - 0.1).toFixed(2))),
         reviews: [...card.reviews, reviewLog]
-      });
+      };
     }
     if (gradeLabel === "Good") {
       if (card.state === "learning" && card.learningStep >= 1) {
-        return markCardDirty({
+        return {
           ...card,
           state: "review",
           learningStep: 0,
@@ -790,9 +783,9 @@ export default function App() {
           nextReview: new Date(now + Math.max(1, card.interval) * 24 * 60 * 60 * 1000).toISOString(),
           easeFactor: Number((card.easeFactor + 0.05).toFixed(2)),
           reviews: [...card.reviews, reviewLog]
-        });
+        };
       }
-      return markCardDirty({
+      return {
         ...card,
         state: "learning",
         learningStep: 1,
@@ -801,9 +794,9 @@ export default function App() {
         interval: 1,
         easeFactor: Number((card.easeFactor + 0.03).toFixed(2)),
         reviews: [...card.reviews, reviewLog]
-      });
+      };
     }
-    return markCardDirty({
+    return {
       ...card,
       state: "review",
       learningStep: 0,
@@ -812,7 +805,7 @@ export default function App() {
       nextReview: new Date(now + 4 * 24 * 60 * 60 * 1000).toISOString(),
       easeFactor: Number((card.easeFactor + 0.15).toFixed(2)),
       reviews: [...card.reviews, reviewLog]
-    });
+    };
   }
 
   function gradeCurrentCard(gradeLabel) {
@@ -836,11 +829,11 @@ export default function App() {
     setCards((prev) =>
       prev.map((card) =>
         card.id === activeReviewCard.id
-          ? markCardDirty({
+          ? {
               ...card,
               front: nextFront,
               back: nextBack
-            })
+            }
           : card
       )
     );
@@ -854,10 +847,10 @@ export default function App() {
     setCards((prev) =>
       prev.map((card) =>
         card.id === activeReviewCard.id
-          ? markCardDirty({
+          ? {
             ...card,
             notes: [...(Array.isArray(card.notes) ? card.notes : []), note]
-          })
+          }
           : card
       )
     );
@@ -949,22 +942,14 @@ export default function App() {
       setAuthLoading(false);
       if (!nextUser) return;
 
-      const userRef = doc(db, "users", nextUser.uid);
-      const snap = await getDoc(userRef);
-      if (!snap.exists()) return;
+      // Simple single getDoc to load all user data
+      try {
+        const snap = await getDoc(doc(db, "users", nextUser.uid));
+        if (!snap.exists()) return;
 
-      const cloud = snap.data();
-      const cloudLastModified = cloud.localLastModified || cloud.lastSyncedAt || null;
-      const localData = loadState();
-      const localLastMod = localData?.localLastModified || null;
-
-      // Only download if localStorage is empty OR Firestore data is newer
-      const localIsEmpty = !localData || !Array.isArray(localData.cards) || localData.cards.length === 0;
-      const cloudIsNewer = cloudLastModified && (!localLastMod || cloudLastModified > localLastMod);
-
-      if (localIsEmpty || cloudIsNewer) {
+        const cloud = snap.data();
         if (Array.isArray(cloud.decks)) setDecks(cloud.decks);
-        if (Array.isArray(cloud.cards)) setCards(cloud.cards.map(markCardClean));
+        if (Array.isArray(cloud.cards)) setCards(cloud.cards);
         if (typeof cloud.dailyGoal === "number") setDailyGoal(cloud.dailyGoal);
         if (cloud.reviewSettings) {
           setReviewSettings({
@@ -976,23 +961,13 @@ export default function App() {
         if (typeof cloud.customColor === "string") setCustomColor(cloud.customColor);
         if (cloud.reviewedByDay && typeof cloud.reviewedByDay === "object") setReviewedByDay(cloud.reviewedByDay);
         if (typeof cloud.activeDeckId === "string") setActiveDeckId(cloud.activeDeckId);
-        if (typeof cloud.view === "string") setView(cloud.view);
         if (typeof cloud.lastSyncedAt === "string") setLastSyncedAt(cloud.lastSyncedAt);
-        if (typeof cloud.localLastModified === "string") setLocalLastModified(cloud.localLastModified);
-        setDirtyDecks(false);
+      } catch (err) {
+        console.error("Failed to load cloud data:", err);
       }
     });
     return () => unsub();
   }, []);
-
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (!user) return;
-      syncToFirestore(false);
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [user, decks, cards, dailyGoal, reviewSettings, themeId, customColor, reviewedByDay, activeDeckId]);
 
   async function submitAuth(event) {
     event.preventDefault();
@@ -1158,9 +1133,16 @@ export default function App() {
           ))}
           {user ? (
             <>
-              <button className="nav-item sync-btn" onClick={() => syncToFirestore(true)} disabled={syncBusy}>
+              <button
+                className={`nav-item sync-btn ${syncStatus === "error" ? "sync-error" : ""}`}
+                onClick={syncToFirestore}
+                disabled={syncBusy}
+              >
                 {syncStatus === "syncing" && <span className="sync-spinner" />}
-                {syncStatus === "syncing" ? "Syncing..." : syncStatus === "done" ? "Synced ✓" : "Sync"}
+                {syncStatus === "syncing" && "Syncing..."}
+                {syncStatus === "done" && `Synced ✓`}
+                {syncStatus === "error" && "Sync failed ✗"}
+                {syncStatus === "idle" && "Sync"}
               </button>
               <button className="nav-item" onClick={() => signOut(auth)}>
                 Sign Out
@@ -1178,7 +1160,7 @@ export default function App() {
               <span className="chart-today">{reviewedToday} today</span>
             </div>
             <div className="activity-chart">
-              <ResponsiveContainer width="100%" height={180}>
+              <ResponsiveContainer width="100%" height={160}>
                 <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <defs>
                     <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
@@ -1191,13 +1173,13 @@ export default function App() {
                     tick={{ fill: "#888", fontSize: 11 }}
                     axisLine={{ stroke: "#333" }}
                     tickLine={false}
-                    interval="preserveStartEnd"
                   />
                   <YAxis
                     tick={{ fill: "#888", fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
                     allowDecimals={false}
+                    domain={[0, "auto"]}
                   />
                   <Tooltip
                     contentStyle={{
@@ -1216,25 +1198,20 @@ export default function App() {
                     fill="url(#chartGradient)"
                     dot={{ r: 4, fill: "#7c3aed", stroke: "#fff", strokeWidth: 1.5 }}
                     activeDot={{ r: 6, fill: "#a78bfa", stroke: "#fff", strokeWidth: 2 }}
+                    isAnimationActive={false}
+                    connectNulls
                   />
                 </AreaChart>
               </ResponsiveContainer>
+            </div>
+            <div className="streak-row">
+              <span className="streak-icon">🔥</span>
+              <span className="streak-count">{statsData.streak} day streak</span>
             </div>
             <button className="primary-btn" onClick={() => startReviewSession(activeDeckId)}>
               Start Reviewing
             </button>
           </section>
-
-          <form className="create-deck-row" onSubmit={createDeck}>
-            <input
-              value={newDeckName}
-              onChange={(event) => setNewDeckName(event.target.value)}
-              placeholder="New deck name"
-            />
-            <button className="primary-btn" type="submit">
-              Create Deck
-            </button>
-          </form>
 
           <section className="deck-grid">
             {decks.map((deck) => {
@@ -1264,8 +1241,15 @@ export default function App() {
                     </button>
                   </div>
                   <div className="deck-body">
-                    <div className="icon-wrap">
-                      {deck.icon ? <img src={deck.icon} alt={`${deck.name} icon`} /> : <span>{deck.name[0]}</span>}
+                    <div
+                      className="icon-wrap"
+                      style={deck.icon ? {} : { background: getLetterGradient(deck.name[0]) }}
+                    >
+                      {deck.icon ? (
+                        <img src={deck.icon} alt={`${deck.name} icon`} />
+                      ) : (
+                        <span className="icon-letter">{deck.name[0]}</span>
+                      )}
                     </div>
                     <div className="deck-info">
                       <div className="deck-name">{deck.name}</div>
@@ -1291,6 +1275,47 @@ export default function App() {
               );
             })}
           </section>
+
+          <button
+            className="fab"
+            onClick={() => setShowNewDeckModal(true)}
+            title="Create new deck"
+          >
+            +
+          </button>
+
+          {showNewDeckModal && (
+            <div className="modal-overlay" onClick={() => setShowNewDeckModal(false)}>
+              <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+                <h3>Create New Deck</h3>
+                <form
+                  onSubmit={(e) => {
+                    createDeck(e);
+                    setShowNewDeckModal(false);
+                  }}
+                >
+                  <input
+                    value={newDeckName}
+                    onChange={(event) => setNewDeckName(event.target.value)}
+                    placeholder="Deck name"
+                    autoFocus
+                  />
+                  <div className="modal-actions">
+                    <button
+                      type="button"
+                      className="mini-btn"
+                      onClick={() => setShowNewDeckModal(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button type="submit" className="primary-btn">
+                      Create
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
         </main>
       )}
 
